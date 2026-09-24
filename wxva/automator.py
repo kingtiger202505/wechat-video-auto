@@ -272,9 +272,20 @@ class Automator:
         kw = self.cfg.keyword
         s = self.p.scale(main)
         old_clip = self.p.get_clipboard()
+        k = norm_text(kw)
+        self._front(main)
+        _img, base_lines = self.shot(main, self._search_area(main), "search_box")
+        # 输入前搜索框里就已经有「近似」文字（比如上一次的关键词）时，只接受完全一致的校验结果，
+        # 否则粘贴失败也可能被误判为成功
+        fuzzy_ok = not _kw_seen(base_lines, kw)
+
+        def typed_ok(lines) -> bool:
+            if any(k in norm_text(x.text) for x in lines):
+                return True
+            return fuzzy_ok and _kw_seen(lines, kw)
 
         def locate_by_ocr():
-            _img, lines = self.shot(main, self._search_area(main), "search_box")
+            lines = base_lines
             cands = [x for x in lines if norm_text(x.text).startswith("搜索")
                      and len(norm_text(x.text)) <= 6]
             if not cands:
@@ -307,7 +318,7 @@ class Automator:
                 self.p.paste_text(kw)
                 self.p.sleep(1.0)
                 _img, lines = self.shot(main, self._search_area(main), "typed")
-                if _kw_seen(lines, kw):
+                if typed_ok(lines):
                     log.info("  搜索框已输入关键词 ✓")
                     return
                 log.info("  %s：搜索框中没看到关键词，换下一种方式", name)
@@ -347,15 +358,33 @@ class Automator:
         log.info("  下拉框中没有「搜一搜」项，按回车")
         self.p.enter()
 
-    def _is_search_page(self, win) -> Optional[float]:
+    def _page_state(self, win) -> Tuple[bool, int]:
+        """(是不是搜一搜结果页, 关键词匹配程度 0=没看到 1=近似 2=完全一致)。"""
         l, t, r, b = win.rect
         _img, lines = self.shot(win, win.rect, "probe_page")
         tab = find_tab(lines, "视频", (t, t + (b - t) * 0.5), self.cfg.keyword,
                        forbid_next="号", min_score=2)
-        return tab[1] if tab else None
+        if tab is None:
+            return False, 0
+        top = [x for x in lines if x.cy < t + (b - t) * 0.35]
+        k = norm_text(self.cfg.keyword)
+        if any(k == norm_text(x.text) or k in norm_text(x.text) for x in top):
+            return True, 2
+        return True, 1 if _kw_seen(top, self.cfg.keyword) else 0
+
+    def _is_search_page(self, win) -> Optional[bool]:
+        ok, _m = self._page_state(win)
+        return True if ok else None
 
     def wait_search_page(self, main, before) -> Target:
-        end = time.time() + self.cfg.page_timeout
+        """等待结果页出现，并确认页面上已经是本次的关键词。
+
+        搜一搜窗口可能是上次留下的（显示旧关键词的结果），所以优先等关键词完全一致；
+        超时一半后接受近似匹配（OCR 误差），全部超时后才接受看不到关键词的页面并给出警告。
+        """
+        start = time.time()
+        end = start + self.cfg.page_timeout
+        fallback = None   # (匹配程度, 窗口)
         while time.time() < end:
             self.p.sleep(1.0)
             wins = [x for x in self.p.list_windows() if x.visible and x.width > 300 and x.height > 300]
@@ -368,17 +397,29 @@ class Automator:
                 if title_hit or is_new:
                     cands.append((0 if title_hit else 1, -x.area, x))
             cands.sort(key=lambda c: (c[0], c[1]))
-            for _a, _b, x in cands:
-                log.info("  候选搜索窗口: %s", x.short() if hasattr(x, "short") else x)
+            half = time.time() > start + self.cfg.page_timeout / 2
+            targets = [c[2] for c in cands]
+            # 搜索页也可能直接嵌在主窗口里；但有独立搜索窗口时优先等它（前一半时间不看主窗口）
+            if not targets or half:
+                targets.append(main)
+            for x in targets:
+                if x is not main:
+                    log.info("  候选搜索窗口: %s", x.short() if hasattr(x, "short") else x)
+                # 先切到前台再截图：否则重叠的其它窗口内容会被当成这个窗口的
                 self.p.focus(x)
                 self.p.sleep(0.4)
                 x = self.p.refresh(x) or x
-                if self._is_search_page(x) is not None:
+                ok, match = self._page_state(x)
+                if not ok:
+                    continue
+                if match == 2 or (match == 1 and half):
                     return self._prepare_target(x)
-            # 搜索页可能直接嵌在主窗口里
-            m = self.p.refresh(main) or main
-            if self._is_search_page(m) is not None:
-                return self._prepare_target(m)
+                if fallback is None or match > fallback[0]:
+                    fallback = (match, x)
+                log.info("  结果页上还不是关键词「%s」，等待页面刷新……", self.cfg.keyword)
+        if fallback is not None:
+            log.warning("  注意：结果页上没确认到关键词「%s」，可能是旧的搜索结果，请核对", self.cfg.keyword)
+            return self._prepare_target(fallback[1])
         raise StepError("等待 %d 秒仍未出现搜一搜结果页（找不到「视频」tab）" % self.cfg.page_timeout)
 
     def _prepare_target(self, win) -> Target:
@@ -386,10 +427,6 @@ class Automator:
         self._front(win)
         win = self.p.ensure_on_screen(win, int(700 * s), int(600 * s))
         log.info("  搜索结果页窗口: %s", win.short() if hasattr(win, "short") else win)
-        l, t, r, b = win.rect
-        _img, lines = self.shot(win, (l, t, r, t + int((b - t) * 0.35)), "page_top")
-        if not _kw_seen(lines, self.cfg.keyword):
-            log.warning("  注意：结果页顶部没识别到关键词「%s」，可能是旧的搜索页，请留意结果", self.cfg.keyword)
         return Target(win=win)
 
     def pick_existing_search_window(self) -> Target:

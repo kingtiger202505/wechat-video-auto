@@ -31,6 +31,8 @@ Rect = Tuple[int, int, int, int]  # left, top, right, bottom（物理像素）
 SW_SHOW = 5
 SW_RESTORE = 9
 SW_SHOWNORMAL = 1
+SW_MINIMIZE = 6
+WM_CLOSE = 0x0010
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
@@ -163,6 +165,8 @@ if IS_WIN:
                               ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                               wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID])
     DestroyWindow = _proto(user32, "DestroyWindow", wintypes.BOOL, [wintypes.HWND])
+    PostMessageW = _proto(user32, "PostMessageW", wintypes.BOOL,
+                          [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM])
     GlobalAlloc = _proto(kernel32, "GlobalAlloc", wintypes.HGLOBAL, [wintypes.UINT, ctypes.c_size_t])
     GlobalLock = _proto(kernel32, "GlobalLock", wintypes.LPVOID, [wintypes.HGLOBAL])
     GlobalUnlock = _proto(kernel32, "GlobalUnlock", wintypes.BOOL, [wintypes.HGLOBAL])

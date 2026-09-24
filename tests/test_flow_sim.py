@@ -94,3 +94,34 @@ def test_fallbacks_no_placeholder_no_entry():
 def test_long_list_lazy_load():
     plat, truth, got, _ = run_sim(n_accounts=90, lazy_batch=15)
     _check(truth, got)
+
+
+def test_stale_search_window_waits_for_new_keyword():
+    # 搜一搜窗口是上次留下的（显示「棉衣批发」的结果），新搜索要过一会儿才刷新
+    plat, truth, got, _ = run_sim(n_accounts=20, stale_keyword="棉衣批发", refresh_delay=4)
+    assert plat.page_text == "羽绒服库存"
+    _check(truth, got)
+
+
+def test_batch_keywords():
+    import argparse
+    import zlib
+    from tests.sim import make_accounts
+    from wxva.cli import run_keywords
+    plat = SimPlatform(n_accounts=18)
+    root = tempfile.mkdtemp(prefix="wxva_batch_")
+    args = argparse.Namespace(max_pages=400, max_accounts=0, scroll_wait=0.0, debug=False,
+                              start_from="main", ocr_scale=None)
+    kws = ["羽绒服库存", "棉衣批发"]
+    code = run_keywords(plat, ocr(), kws, root, args, batch=True)
+    assert code == 0
+    exp = {"羽绒服库存": make_accounts(18), "棉衣批发": make_accounts(18, seed=zlib.crc32("棉衣批发".encode()))}
+    for i, kw in enumerate(kws, 1):
+        d = os.path.join(root, "%02d_%s" % (i, kw))
+        got = open(os.path.join(d, "accounts.txt"), encoding="utf-8").read().split()
+        truth = [a[0] for a in exp[kw]]
+        print(kw, len(got), len(truth))
+        _check(truth, got)
+    assert os.path.exists(os.path.join(root, "汇总_全部关键词.csv"))
+    names = open(os.path.join(root, "汇总_去重账号名单.txt"), encoding="utf-8").read().split()
+    assert len(names) == len(set(a[0] for v in exp.values() for a in v))

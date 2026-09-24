@@ -94,7 +94,7 @@ class SimWin:
 class SimPlatform:
     def __init__(self, n_accounts=57, scale=1.0, dark=False, entry_text="搜一搜",
                  search_in_main=False, lazy_batch=20, notch_px=100, screen=None,
-                 avatars=True, placeholder=True):
+                 avatars=True, placeholder=True, stale_keyword=None, refresh_delay=3):
         self.avatars = avatars
         self.placeholder = placeholder
         self.s = scale
@@ -111,7 +111,11 @@ class SimPlatform:
         self.main = SimWin(1, "微信", (S(60), S(40), S(60 + 900), S(40 + 640)))
         self.search = SimWin(2, "搜一搜", (S(420), S(60), S(420 + 820), S(60 + 900)), pid=1001,
                              cls="Chrome_WidgetWin_0")
-        self.search_open = False
+        self.n_accounts = n_accounts
+        self.refresh_delay = refresh_delay
+        self.page_text = stale_keyword or ""
+        self.pending_page = None          # (剩余 sleep 次数, 新关键词)
+        self.search_open = bool(stale_keyword)
         self.search_focus = False
         self.search_text = ""
         self.dropdown = False
@@ -122,9 +126,18 @@ class SimPlatform:
         self.clicks = []
         self.enter_pressed = 0
         self._list_img = None
+        if stale_keyword:
+            self._load_page(stale_keyword)   # 上次留下的搜一搜窗口
 
     # ---------------------------------------------------------------- API
     def sleep(self, sec):
+        if self.pending_page is not None:
+            n, kw = self.pending_page
+            if n <= 1:
+                self._load_page(kw)
+                self.pending_page = None
+            else:
+                self.pending_page = (n - 1, kw)
         # 懒加载：等待一段时间后加载下一批
         if self.pending_load:
             self.pending_load -= 1
@@ -188,11 +201,29 @@ class SimPlatform:
         pass
 
     def _open_search(self):
+        was_open = self.search_open
         self.search_open = True
         self.dropdown = False
         self.search_focus = False
         self.front = self.main if self.search_in_main else self.search
+        if was_open and self.page_text:
+            # 已打开的搜一搜窗口：过一会儿才刷新成新关键词的结果
+            self.pending_page = (self.refresh_delay, self.search_text)
+        else:
+            self._load_page(self.search_text)
+
+    def _load_page(self, kw):
+        import zlib
+        self.page_text = kw
         self.tab = "全部"
+        self.subtab = None
+        self.scroll = 0
+        if kw != "羽绒服库存":   # 其它关键词换一批账号
+            self.accounts = make_accounts(self.n_accounts, seed=zlib.crc32(kw.encode()))
+        else:
+            self.accounts = make_accounts(self.n_accounts)
+        self.loaded = min(self.lazy_batch, len(self.accounts))
+        self._list_img = None
 
     # ---------------------------------------------------------------- 布局
     def _S(self, v):
@@ -233,7 +264,10 @@ class SimPlatform:
     def click(self, x, y):
         self.clicks.append((x, y))
         inside = lambda bx: bx[0] - 4 <= x <= bx[2] + 4 and bx[1] - 4 <= y <= bx[3] + 4
-        if self.search_open:
+        ml, mt, mr, mb = self.main.rect
+        main_on_top = (self.front is self.main and not self.search_in_main
+                       and ml <= x <= mr and mt <= y <= mb)
+        if self.search_open and not main_on_top:
             win = self._page_win()
             l, t, r, b = win.rect
             if l <= x <= r and t <= y <= b:
@@ -350,7 +384,7 @@ class SimPlatform:
         d.text((l + S(16), t + S(10)), "搜一搜", font=font(S(13)), fill=(120, 120, 120))
         d.rounded_rectangle((l + S(40), t + S(40), r - S(40), t + S(74)), radius=S(6),
                             fill=(60, 60, 60) if self.dark else (242, 242, 242))
-        d.text((l + S(60), t + S(47)), self.search_text, font=font(S(15)), fill=fg)
+        d.text((l + S(60), t + S(47)), self.page_text, font=font(S(15)), fill=fg)
         tabs, tab_boxes, sub_boxes, list_top = self._page_layout()
         for name, bx in tab_boxes.items():
             c = (7, 193, 96) if name == self.tab else fg
@@ -367,15 +401,19 @@ class SimPlatform:
             d.text((l + S(40), list_top + S(20)), "羽绒服库存怎么处理？三分钟看懂", font=font(S(15)), fill=fg)
             d.rectangle((l + S(40), list_top + S(50), l + S(300), list_top + S(200)), fill=(90, 120, 160))
         else:
-            d.text((l + S(40), list_top + S(20)), "羽绒服库存 相关文章", font=font(S(15)), fill=fg)
+            d.text((l + S(40), list_top + S(20)), self.page_text + " 相关文章", font=font(S(15)), fill=fg)
 
     def capture(self, rect):
         img = Image.new("RGB", self.screen, (0, 90, 140))
         if self.search_in_main and self.search_open:
             self._render_page(img)
         else:
-            self._render_main(img)
-            if self.search_open:
-                self._render_page(img)
+            if self.search_open and self.front is self.main:
+                self._render_page(img)     # 主窗口在前台时盖住搜一搜窗口
+                self._render_main(img)
+            else:
+                self._render_main(img)
+                if self.search_open:
+                    self._render_page(img)
         l, t, r, b = [int(v) for v in rect]
         return img.crop((l, t, r, b))
